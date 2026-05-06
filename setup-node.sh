@@ -107,14 +107,20 @@ echo "[5/7] Docker"
 if ! command -v docker &>/dev/null; then
   curl -fsSL https://get.docker.com | sh
   systemctl enable --now docker
+  sleep 5
 fi
 
 echo "[6/7] Get panel cert + start marzban-node"
-TOKEN=$(curl -s -X POST "$PANEL_URL/api/admin/token" \
+AUTH_RESP=$(curl -s -X POST "$PANEL_URL/api/admin/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=$PANEL_USER&password=$PANEL_PASS" | jq -r '.access_token')
+  -d "username=$PANEL_USER&password=$PANEL_PASS")
+TOKEN=$(echo "$AUTH_RESP" | jq -r '.access_token // empty')
 
-[[ -z "$TOKEN" || "$TOKEN" == "null" ]] && { echo "ERROR: Panel auth failed"; exit 1; }
+if [[ -z "$TOKEN" ]]; then
+  echo "ERROR: Panel auth failed"
+  echo "Response: $AUTH_RESP"
+  exit 1
+fi
 
 mkdir -p /var/lib/marzban-node /opt/marzban-node
 
