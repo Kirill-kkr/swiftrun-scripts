@@ -149,19 +149,47 @@ docker compose up -d
 sleep 5
 
 echo "[7/7] Register node in panel"
-NODE_IP=$(curl -s https://ipinfo.io/ip 2>/dev/null || hostname -I | awk '{print $1}')
+IPINFO=$(curl -s https://ipinfo.io/json 2>/dev/null)
+NODE_IP=$(echo "$IPINFO" | jq -r '.ip // empty')
+[[ -z "$NODE_IP" ]] && NODE_IP=$(hostname -I | awk '{print $1}')
+COUNTRY_CODE=$(echo "$IPINFO" | jq -r '.country // empty')
+COUNTRY_CITY=$(echo "$IPINFO" | jq -r '.city // empty')
+
+country_label() {
+  case "$1" in
+    NL) echo "🇳🇱 Netherlands" ;;
+    DE) echo "🇩🇪 Germany" ;;
+    FI) echo "🇫🇮 Finland" ;;
+    FR) echo "🇫🇷 France" ;;
+    GB) echo "🇬🇧 UK" ;;
+    US) echo "🇺🇸 USA" ;;
+    RU) echo "🇷🇺 Russia" ;;
+    UA) echo "🇺🇦 Ukraine" ;;
+    PL) echo "🇵🇱 Poland" ;;
+    SE) echo "🇸🇪 Sweden" ;;
+    TR) echo "🇹🇷 Turkey" ;;
+    SG) echo "🇸🇬 Singapore" ;;
+    JP) echo "🇯🇵 Japan" ;;
+    *) echo "🌍 $1" ;;
+  esac
+}
+
+DISPLAY_NAME="$(country_label "$COUNTRY_CODE") · $NAME"
+
 RESULT=$(curl -s -X POST "$PANEL_URL/api/node" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"name\":\"$NAME\",\"address\":\"$NODE_IP\",\"port\":62050,\"api_port\":62051,\"usage_coefficient\":1}")
+  -d "{\"name\":\"$DISPLAY_NAME\",\"address\":\"$NODE_IP\",\"port\":62050,\"api_port\":62051,\"usage_coefficient\":1}")
 NODE_ID=$(echo "$RESULT" | jq -r '.id // "unknown"')
 
 echo ""
 echo "════════════════════════════════════════════"
-echo "  НОДА ГОТОВА: $NAME"
+echo "  ✅ НОДА ГОТОВА"
 echo "════════════════════════════════════════════"
+echo "  Имя:     $DISPLAY_NAME"
+echo "  ID:      $NODE_ID"
 echo "  IP:      $NODE_IP"
-echo "  Node ID: $NODE_ID"
+echo "  Город:   $COUNTRY_CITY"
 echo ""
 echo "  Нода зарегистрирована в панели автоматически."
 echo "  Проверь статус в $PANEL_URL/dashboard/"
