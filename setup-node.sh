@@ -75,6 +75,10 @@ DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q
 apt-get install -y -q curl wget jq nano htop net-tools fail2ban
 systemctl enable --now fail2ban
 
+timedatectl set-ntp true
+systemctl restart systemd-timesyncd
+sleep 3
+
 echo "[4/7] BBR + sysctl"
 grep -q 'tcp_congestion_control=bbr' /etc/sysctl.conf || cat >> /etc/sysctl.conf << 'SYSCTL'
 
