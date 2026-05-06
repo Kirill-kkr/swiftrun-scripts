@@ -101,7 +101,7 @@ LIMITS
 
 echo "[5/7] Docker"
 if ! command -v docker &>/dev/null; then
-  apt-get install -y -q docker.io docker-compose-plugin
+  curl -fsSL https://get.docker.com | sh
   systemctl enable --now docker
 fi
 
