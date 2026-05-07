@@ -1,199 +1,155 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+#
+# setup-node.sh — развёртка Remnawave-Node на чистой Ubuntu/Debian VPS.
+# https://github.com/Kirill-kkr/swiftrun-scripts
+#
+# По docs.rw/docs/install/remnawave-node:
+#   1. Устанавливает Docker (если нужно).
+#   2. Создаёт /opt/remnanode/.
+#   3. Принимает docker-compose.yml для ноды от оператора (вставкой stdin
+#      или через --compose-file <path>). Этот файл генерируется панелью
+#      при создании ноды через UI (Nodes → Management → +) и содержит
+#      embedded SECRET_KEY + сертификат — поэтому НЕТ headless-варианта
+#      без участия админа панели.
+#   4. docker compose up -d.
+#
+# Использование:
+#
+#   # 1. В Remnawave admin UI: Nodes → Management → + → создать ноду →
+#   #    скопировать docker-compose.yml через кнопку «Copy».
+#   # 2. На ноде через ssh запустить:
+#
+#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh)
+#
+#   # или с предзаписанным compose-файлом:
+#   curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh -o /tmp/setup-node.sh
+#   sudo bash /tmp/setup-node.sh --compose-file /tmp/node-compose.yml
+#
+# Безопасность: docker-compose.yml содержит SECRET_KEY ноды (mTLS). Скрипт
+# принимает его ТОЛЬКО через stdin или --compose-file path; НИКОГДА через
+# CLI argv (чтобы не светиться в `ps`/history). Это сознательное
+# ограничение — решает security-проблему предыдущей Marzban-эпохи скрипта,
+# где admin-пароль панели передавался через --panel-pass.
 
-usage() {
-  echo "Usage: $0 --name NAME --panel-url URL --panel-user USER --panel-pass PASS --panel-ip IP --ssh-key 'ssh-ed25519 ...'"
-  echo ""
-  echo "  --name        Node name in panel, e.g. nl-2"
-  echo "  --panel-url   Panel HTTPS URL, e.g. https://panel.swiftrun.work:8000"
-  echo "  --panel-user  Panel admin username"
-  echo "  --panel-pass  Panel admin password"
-  echo "  --panel-ip    Panel server IP for UFW, e.g. 150.251.145.57"
-  echo "  --ssh-key     Public SSH key to add for admin user"
-  exit 1
-}
+set -euo pipefail
 
-NAME="" PANEL_URL="" PANEL_USER="" PANEL_PASS="" PANEL_IP="" SSH_KEY=""
+NODE_DIR="/opt/remnanode"
+COMPOSE_FILE_FLAG=""
 
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --name)       NAME="$2";       shift 2 ;;
-    --panel-url)  PANEL_URL="$2";  shift 2 ;;
-    --panel-user) PANEL_USER="$2"; shift 2 ;;
-    --panel-pass) PANEL_PASS="$2"; shift 2 ;;
-    --panel-ip)   PANEL_IP="$2";   shift 2 ;;
-    --ssh-key)    SSH_KEY="$2";    shift 2 ;;
-    *) echo "Unknown argument: $1"; usage ;;
-  esac
+log()    { printf '\033[36m[node]\033[0m %s\n' "$*"; }
+ok()     { printf '\033[32m[ ok ]\033[0m %s\n' "$*"; }
+warn()   { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
+fail()   { printf '\033[31m[FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# --- args ---
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--compose-file)
+			COMPOSE_FILE_FLAG="${2:?--compose-file требует path}"
+			shift 2
+			;;
+		-h|--help)
+			head -n 30 "$0"; exit 0
+			;;
+		*)
+			fail "неизвестный аргумент: $1"
+			;;
+	esac
 done
 
-[[ -z "$NAME" || -z "$PANEL_URL" || -z "$PANEL_USER" || -z "$PANEL_PASS" || -z "$PANEL_IP" || -z "$SSH_KEY" ]] && usage
-
-[[ "$EUID" -ne 0 ]] && { echo "Run as root"; exit 1; }
-
-echo "[1/7] User setup"
-if ! id admin &>/dev/null; then
-  if getent group admin &>/dev/null; then
-    adduser --disabled-password --gecos "" --ingroup admin admin
-  else
-    adduser --disabled-password --gecos "" admin
-  fi
+if [ "$(id -u)" -ne 0 ]; then
+	fail "запускай через sudo"
 fi
-usermod -aG sudo admin
-
-mkdir -p /home/admin/.ssh
-echo "$SSH_KEY" > /home/admin/.ssh/authorized_keys
-chown -R admin:admin /home/admin/.ssh
-chmod 700 /home/admin/.ssh
-chmod 600 /home/admin/.ssh/authorized_keys
-
-echo "admin ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/admin-nopasswd
-chmod 440 /etc/sudoers.d/admin-nopasswd
-
-sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/'       /etc/ssh/sshd_config
-sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-grep -q 'PubkeyAuthentication yes' /etc/ssh/sshd_config || \
-  echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config
-systemctl restart ssh
-
-echo "[2/7] UFW"
-apt-get install -y -q ufw
-ufw --force reset
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp   comment 'SSH'
-ufw allow 80/tcp   comment 'HTTP'
-ufw allow 443/tcp  comment 'VLESS+Reality'
-ufw allow 443/udp  comment 'reserved'
-ufw allow from "$PANEL_IP" to any port 62050 proto tcp comment 'marzban-node REST'
-ufw allow from "$PANEL_IP" to any port 62051 proto tcp comment 'Xray API'
-ufw --force enable
-
-echo "[3/7] System update + packages"
-apt-get update -q
-DEBIAN_FRONTEND=noninteractive apt-get upgrade -y -q
-apt-get install -y -q curl wget jq nano htop net-tools fail2ban
-systemctl enable --now fail2ban
-
-timedatectl set-ntp true
-systemctl restart systemd-timesyncd
-sleep 3
-
-echo "[4/7] BBR + sysctl"
-grep -q 'tcp_congestion_control=bbr' /etc/sysctl.conf || cat >> /etc/sysctl.conf << 'SYSCTL'
-
-# SwiftrunVPN tuning
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-net.netfilter.nf_conntrack_max=524288
-net.ipv4.ip_local_port_range=1024 65535
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_fin_timeout=15
-net.ipv4.tcp_keepalive_time=300
-net.ipv4.tcp_syncookies=1
-net.ipv4.tcp_max_syn_backlog=4096
-net.core.somaxconn=65535
-net.core.netdev_max_backlog=16384
-fs.file-max=1000000
-SYSCTL
-sysctl -p -q
-
-grep -q 'nofile 1000000' /etc/security/limits.conf || cat >> /etc/security/limits.conf << 'LIMITS'
-* soft nofile 1000000
-* hard nofile 1000000
-LIMITS
-
-echo "[5/7] Docker"
-if ! command -v docker &>/dev/null; then
-  curl -fsSL https://get.docker.com | sh
-  systemctl enable --now docker
-  sleep 5
+if ! command -v curl >/dev/null 2>&1; then
+	fail "нужен curl"
 fi
 
-echo "[6/7] Get panel cert + start marzban-node"
-AUTH_RESP=$(curl -s -X POST "$PANEL_URL/api/admin/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=$PANEL_USER&password=$PANEL_PASS")
-TOKEN=$(echo "$AUTH_RESP" | jq -r '.access_token // empty')
+# --- 1. Docker ---
 
-if [[ -z "$TOKEN" ]]; then
-  echo "ERROR: Panel auth failed"
-  echo "Response: $AUTH_RESP"
-  exit 1
+if ! command -v docker >/dev/null 2>&1; then
+	log "ставлю Docker (через get.docker.com)…"
+	curl -fsSL https://get.docker.com | sh
+	ok "Docker установлен"
+else
+	ok "Docker уже установлен"
 fi
 
-mkdir -p /var/lib/marzban-node /opt/marzban-node
+# --- 2. Каталог ---
 
-curl -s -H "Authorization: Bearer $TOKEN" \
-  "$PANEL_URL/api/node/settings" | jq -r '.certificate' > /var/lib/marzban-node/cert.pem
+mkdir -p "$NODE_DIR"
+cd "$NODE_DIR"
 
-cat > /opt/marzban-node/docker-compose.yml << 'EOF'
-services:
-  marzban-node:
-    container_name: marzban-node
-    image: gozargah/marzban-node:latest
-    restart: always
-    network_mode: host
-    environment:
-      SSL_CLIENT_CERT_FILE: "/var/lib/marzban-node/cert.pem"
-      SERVICE_PORT: "62050"
-      XRAY_API_PORT: "62051"
-      SERVICE_PROTOCOL: "rest"
-    volumes:
-      - /var/lib/marzban-node:/var/lib/marzban
-      - /var/lib/marzban-node:/var/lib/marzban-node
+# --- 3. compose.yml ---
+
+if [ -f docker-compose.yml ]; then
+	ok "docker-compose.yml уже существует — переподнимаю существующий стек"
+else
+	if [ -n "$COMPOSE_FILE_FLAG" ]; then
+		# Скопировать из указанного path.
+		[ -f "$COMPOSE_FILE_FLAG" ] || fail "файл не найден: $COMPOSE_FILE_FLAG"
+		cp "$COMPOSE_FILE_FLAG" docker-compose.yml
+		ok "compose-файл скопирован из $COMPOSE_FILE_FLAG"
+	else
+		# Интерактивный режим — попросить оператора вставить.
+		cat <<'EOF'
+
+Вставь docker-compose.yml для этой ноды (скопирован из Remnawave admin UI).
+Завершить ввод: Ctrl+D на пустой строке.
+
 EOF
+		cat > docker-compose.yml
+		[ -s docker-compose.yml ] || fail "пустой ввод; ничего не записано"
+		ok "compose-файл получен"
+	fi
+fi
+chmod 600 docker-compose.yml
 
-cd /opt/marzban-node
+# Sanity-checks: убедимся, что файл выглядит как Remnawave-Node compose.
+if ! grep -qE 'image:\s*remnawave/node' docker-compose.yml; then
+	warn "в compose-файле нет 'image: remnawave/node' — проверь источник"
+fi
+if ! grep -qE 'SECRET_KEY' docker-compose.yml; then
+	warn "в compose-файле не вижу SECRET_KEY — нода без секрета не подключится"
+fi
+
+# --- 4. firewall hint ---
+NODE_PORT=$(grep -oE 'APP_PORT=[0-9]+' docker-compose.yml | head -1 | cut -d= -f2 || true)
+if [ -z "$NODE_PORT" ]; then
+	# Параметр иногда задан через environment, иногда через ports — попробуем достать из ports:
+	NODE_PORT=$(grep -oE '[0-9]+:[0-9]+' docker-compose.yml | head -1 | cut -d: -f1 || true)
+fi
+NODE_PORT="${NODE_PORT:-2222}"
+
+log "ожидаемый node port: $NODE_PORT (откой только для IP панели в ufw)"
+
+# --- 5. up ---
+
+log "docker compose pull…"
+docker compose pull
+log "docker compose up -d…"
 docker compose up -d
-sleep 5
 
-echo "[7/7] Register node in panel"
-IPINFO=$(curl -s https://ipinfo.io/json 2>/dev/null)
-NODE_IP=$(echo "$IPINFO" | jq -r '.ip // empty')
-[[ -z "$NODE_IP" ]] && NODE_IP=$(hostname -I | awk '{print $1}')
-COUNTRY_CODE=$(echo "$IPINFO" | jq -r '.country // empty')
-COUNTRY_CITY=$(echo "$IPINFO" | jq -r '.city // empty')
+sleep 3
+docker compose ps
 
-country_label() {
-  case "$1" in
-    NL) echo "🇳🇱 Netherlands" ;;
-    DE) echo "🇩🇪 Germany" ;;
-    FI) echo "🇫🇮 Finland" ;;
-    FR) echo "🇫🇷 France" ;;
-    GB) echo "🇬🇧 UK" ;;
-    US) echo "🇺🇸 USA" ;;
-    RU) echo "🇷🇺 Russia" ;;
-    UA) echo "🇺🇦 Ukraine" ;;
-    PL) echo "🇵🇱 Poland" ;;
-    SE) echo "🇸🇪 Sweden" ;;
-    TR) echo "🇹🇷 Turkey" ;;
-    SG) echo "🇸🇬 Singapore" ;;
-    JP) echo "🇯🇵 Japan" ;;
-    *) echo "🌍 $1" ;;
-  esac
-}
+cat <<EOF
 
-DISPLAY_NAME="$(country_label "$COUNTRY_CODE") · $NAME"
 
-RESULT=$(curl -s -X POST "$PANEL_URL/api/node" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"name\":\"$DISPLAY_NAME\",\"address\":\"$NODE_IP\",\"port\":62050,\"api_port\":62051,\"usage_coefficient\":1}")
-NODE_ID=$(echo "$RESULT" | jq -r '.id // "unknown"')
+┌─────────────────────────────────────────────────────────────────┐
+│  Remnawave-Node поднята.                                        │
+│                                                                 │
+│  Проверь в Remnawave admin UI: Nodes → видна нода со статусом   │
+│  Connected (через 30-60 секунд).                                │
+│                                                                 │
+│  Firewall (если ufw):                                           │
+│    sudo ufw allow from <PANEL_IP> to any port $NODE_PORT proto tcp
+│    sudo ufw deny in $NODE_PORT/tcp     # запретить остальным    │
+│                                                                 │
+│  Дальше: открыть :443 для VLESS REALITY трафика (он публичный): │
+│    sudo ufw allow 443/tcp                                       │
+│                                                                 │
+│  Логи: cd $NODE_DIR && docker compose logs -f                   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 
-echo ""
-echo "════════════════════════════════════════════"
-echo "  ✅ НОДА ГОТОВА"
-echo "════════════════════════════════════════════"
-echo "  Имя:     $DISPLAY_NAME"
-echo "  ID:      $NODE_ID"
-echo "  IP:      $NODE_IP"
-echo "  Город:   $COUNTRY_CITY"
-echo ""
-echo "  Нода зарегистрирована в панели автоматически."
-echo "  Проверь статус в $PANEL_URL/dashboard/"
-echo "════════════════════════════════════════════"
-echo ""
-echo "Logs:"
-docker compose logs --tail=8
+EOF
