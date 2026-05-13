@@ -2,6 +2,62 @@
 
 Утилиты развёртки нод [SwiftrunVPN](https://github.com/Kirill-kkr) на чистой Ubuntu/Debian VPS.
 
+## `check-clean-ip.py` — проверка IP на RU mobile whitelist
+
+Проверяет попадает ли IP VPS в список CIDR-блоков, которые **остаются доступны**
+на российских мобильных операторах в режиме whitelist (когда оператор режет
+всё кроме разрешённых ресурсов — это бывает регулярно при ЧП).
+
+Источник: [hxehex/russia-mobile-internet-whitelist](https://github.com/hxehex/russia-mobile-internet-whitelist)
+— community-maintained список из ~30k CIDR-блоков и индивидуальных IP, попавших
+в "белые" списки операторов.
+
+### Использование
+
+```bash
+# Скачать и запустить одной командой
+curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/check-clean-ip.py | python3 - <IP>
+
+# Или установить локально
+curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/check-clean-ip.py -o /usr/local/bin/check-clean-ip
+chmod +x /usr/local/bin/check-clean-ip
+check-clean-ip 87.240.190.78
+```
+
+### Поведение
+
+- Скачивает свежий список и кеширует на 24 часа в `~/.cache/swiftrun-clean-ip/`
+- Проверяет IP сначала по `ipwhitelist.txt` (точное совпадение), потом по `cidrwhitelist.txt`
+- **Exit codes**:
+  - `0` — IP в whitelist (✓ зелёный)
+  - `1` — IP вне whitelist (✗ красный)
+  - `2` — невалидный IP
+
+### Workflow покупки чистой VPS
+
+1. Заказываешь VPS у RU-хостера (Timeweb, FirstByte, Aeza, ihor.ru, Hostkey и т.п.)
+2. Получаешь public IP
+3. Прогоняешь `check-clean-ip <IP>` — если `✓ WHITELISTED` → берёшь
+4. Если `✗` → просишь хостера сменить IP (большинство делает за 50-100₽) и проверяешь снова
+5. После подтверждения чистоты IP — запускаешь `setup-node.sh` для установки Remnawave-Node
+
+### Принудительное обновление кеша
+
+```bash
+check-clean-ip --update
+```
+
+### Внимание
+
+- Список whitelist собирается community, не официальный — точность зависит от свежести
+  репорта по конкретному оператору/региону
+- В реальности после whitelist-check желательно ещё прогнать `nc -zw3 IP 443` с симки
+  целевого оператора в нужном регионе чтобы убедиться что IP реально проходит
+- Whitelist меняется операторами — IP может быть в списке сегодня, но завтра вылететь.
+  Имей запас в виде 2-3 VPS у разных хостеров.
+
+---
+
 ## `setup-node.sh` — Remnawave-Node
 
 Поднимает [Remnawave-Node](https://github.com/remnawave/node) на свежей VPS:
