@@ -2,15 +2,19 @@
 
 Утилиты развёртки нод [SwiftrunVPN](https://github.com/Kirill-kkr) на чистой Ubuntu/Debian VPS.
 
-## `check-clean-ip.py` — проверка IP на RU mobile whitelist
+## `check-clean-ip.py` — комплексная проверка IP на пригодность к RU VPN
 
-Проверяет попадает ли IP VPS в список CIDR-блоков, которые **остаются доступны**
-на российских мобильных операторах в режиме whitelist (когда оператор режет
-всё кроме разрешённых ресурсов — это бывает регулярно при ЧП).
+Прогоняет IP через **2 теста**:
 
-Источник: [hxehex/russia-mobile-internet-whitelist](https://github.com/hxehex/russia-mobile-internet-whitelist)
-— community-maintained список из ~30k CIDR-блоков и индивидуальных IP, попавших
-в "белые" списки операторов.
+1. **Whitelist** — попадает ли IP в community-список CIDR-блоков, которые
+   остаются доступны на российских мобильных операторах в режиме restriction
+   (когда оператор режет всё кроме разрешённых ресурсов — бывает регулярно).
+   Источник: [hxehex/russia-mobile-internet-whitelist](https://github.com/hxehex/russia-mobile-internet-whitelist)
+   (~30k CIDR + индивидуальные IP).
+
+2. **TCP-reachability с RU** — через [check-host.net](https://check-host.net) API
+   делает TCP-connect на `:443` (или другой порт) с 4-х нод в РФ (Москва/СПб/Екб).
+   Показывает реальный пинг и достижимость с разных регионов.
 
 ### Использование
 
@@ -24,37 +28,61 @@ chmod +x /usr/local/bin/check-clean-ip
 check-clean-ip 87.240.190.78
 ```
 
-### Поведение
-
-- Скачивает свежий список и кеширует на 24 часа в `~/.cache/swiftrun-clean-ip/`
-- Проверяет IP сначала по `ipwhitelist.txt` (точное совпадение), потом по `cidrwhitelist.txt`
-- **Exit codes**:
-  - `0` — IP в whitelist (✓ зелёный)
-  - `1` — IP вне whitelist (✗ красный)
-  - `2` — невалидный IP
-
-### Workflow покупки чистой VPS
-
-1. Заказываешь VPS у RU-хостера (Timeweb, FirstByte, Aeza, ihor.ru, Hostkey и т.п.)
-2. Получаешь public IP
-3. Прогоняешь `check-clean-ip <IP>` — если `✓ WHITELISTED` → берёшь
-4. Если `✗` → просишь хостера сменить IP (большинство делает за 50-100₽) и проверяешь снова
-5. После подтверждения чистоты IP — запускаешь `setup-node.sh` для установки Remnawave-Node
-
-### Принудительное обновление кеша
+Опции:
 
 ```bash
-check-clean-ip --update
+check-clean-ip <IP>                # все проверки
+check-clean-ip --no-reach <IP>     # только whitelist (без пингов, мгновенно)
+check-clean-ip --port 2087 <IP>    # другой порт для reachability check
+check-clean-ip --update            # принудительное обновление кеша whitelist
 ```
+
+### Пример вывода
+
+```
+Checking 87.240.190.78
+
+1. RU mobile whitelist (hxehex)
+   ✓ in whitelist  CIDR: 87.240.176.0/20
+
+2. RU operator reachability (TCP :443 via check-host.net)
+   ✓ ru1  Moscow           13ms
+   ✓ ru2  Moscow           9ms
+   ✓ ru3  Saint Petersburg 2ms
+   ✓ ru4  Ekaterinburg     53ms
+
+VERDICT: ✓ ALL CLEAN (5/5) — safe to use
+```
+
+### Verdicts
+
+- **✓ ALL CLEAN** — IP в whitelist + достижим из РФ → можно ставить ноду
+- **⚠ PARTIAL** — достижим, но не в whitelist → будет работать пока оператор не введёт restriction mode
+- **✗ DIRTY** — ничего не работает → менять IP
+
+### Exit codes
+
+- `0` — all checks pass
+- `1` — partial / fail
+- `2` — invalid IP
+
+### Workflow покупки чистого IP
+
+1. Заказываешь VPS у RU-хостера (Timeweb, FirstByte, Aeza, ihor.ru, Hostkey, VK Cloud, и т.п.)
+2. Получаешь public IP
+3. `check-clean-ip <IP>` — если `ALL CLEAN` → берёшь
+4. Если `PARTIAL` или `DIRTY` → пишешь в тикет "поменять IP" (50-100₽), пробуешь снова
+5. После подтверждения чистоты IP — запускаешь `setup-node.sh` для установки Remnawave-Node
 
 ### Внимание
 
-- Список whitelist собирается community, не официальный — точность зависит от свежести
+- Whitelist собирается community, не официальный — точность зависит от свежести
   репорта по конкретному оператору/региону
-- В реальности после whitelist-check желательно ещё прогнать `nc -zw3 IP 443` с симки
-  целевого оператора в нужном регионе чтобы убедиться что IP реально проходит
-- Whitelist меняется операторами — IP может быть в списке сегодня, но завтра вылететь.
-  Имей запас в виде 2-3 VPS у разных хостеров.
+- Идеальная проверка — `nc -zw3 IP 443` с **симки целевого оператора в нужном
+  регионе**. check-host.net проверяет с datacenter-нод, а не с мобильных
+  операторов — DPI блок мобильных может не отлавливаться
+- Whitelist меняется — IP может быть в списке сегодня, выпасть завтра.
+  Держи 2-3 VPS у разных хостеров для резерва
 
 ---
 
