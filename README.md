@@ -86,6 +86,82 @@ VERDICT: ✓ ALL CLEAN (5/5) — safe to use
 
 ---
 
+## `rotate-yc-ip.sh` — ротация IP в Yandex Cloud до чистого
+
+Крутит stop/start виртуалки в **твоём** Yandex Cloud через **локальный `yc` CLI**,
+пока IP не попадёт в RU mobile whitelist.
+
+Никаких сторонних ботов и третьих лиц. Скрипт обращается к YC API только через
+`yc` CLI, который ты сам авторизовал командой `yc init`. Все credentials остаются
+на твоей машине.
+
+### Требования
+
+- [Yandex Cloud CLI](https://yandex.cloud/docs/cli/quickstart) — `yc`
+- `python3`, `jq`, `curl`
+- Авторизация: `yc init` (один раз)
+
+```bash
+# Install yc CLI (macOS / Linux)
+curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+yc init
+```
+
+### Использование
+
+```bash
+# Скачать и запустить одной командой
+curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/rotate-yc-ip.sh \
+  | bash -s -- <vm-name>
+
+# Или установить локально
+curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/rotate-yc-ip.sh \
+  -o /usr/local/bin/rotate-yc-ip
+chmod +x /usr/local/bin/rotate-yc-ip
+
+rotate-yc-ip swiftrun-node-1           # до 20 попыток
+rotate-yc-ip swiftrun-node-1 50        # до 50 попыток
+```
+
+### Что делает
+
+1. Останавливает VM
+2. Запускает её снова (получает новый динамический public IP)
+3. Достаёт IP через `yc compute instance get ... --format json`
+4. Проверяет через `check-clean-ip.py --no-reach` (whitelist match)
+5. Если в whitelist → ✓ готово, печатает IP и следующие шаги
+6. Если нет → возвращается к п.1
+
+### Воркфлоу
+
+```bash
+# 1. Создай минимальную VM в Yandex Cloud (через console.yandex.cloud)
+#    параметры: 2 vCPU / 2 GB / 30 GB / ubuntu-2204-lts / zone ru-central1-a
+
+# 2. Возьми её имя (например swiftrun-node-1) и запусти ротатор:
+rotate-yc-ip swiftrun-node-1 30
+
+# 3. Когда ✓ FOUND CLEAN IP — проверь полным чеком:
+check-clean-ip <IP>
+
+# 4. Если ALL CLEAN — поставь ноду:
+ssh ubuntu@<IP>
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh)
+```
+
+### Альтернатива — `@hunter_yasha_bot`
+
+В Telegram есть бот **`@hunter_yasha_bot`** — делает ровно то же, но **за тебя** на их инфраструктуре.
+
+- **Плюс**: не надо самому крутить, готовый IP за минуты
+- **Плюс**: 500₽ за каждый найденный (первый — бесплатно бонусом)
+- **Минус**: требует загрузить JSON-ключ сервисного аккаунта твоего YC — полный доступ к твоему облаку
+
+Если параноишь насчёт credentials третьим лицам — используй этот скрипт.
+Если время дороже денег — `@hunter_yasha_bot`.
+
+---
+
 ## `setup-node.sh` — Remnawave-Node
 
 Поднимает [Remnawave-Node](https://github.com/remnawave/node) на свежей VPS:
