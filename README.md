@@ -180,24 +180,30 @@ mTLS-сертификатом), запускает контейнер.
 **Шаг 2** — на VPS под `root` (или через `sudo`):
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh -o /tmp/setup-node.sh
+sudo bash /tmp/setup-node.sh
+```
+
+Скрипт покажет banner и попросит вставить docker-compose.yml из Шага 1.
+Завершить ввод — `Ctrl+D` на пустой строке.
+
+**Альтернатива одной командой через pipe:**
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh | sudo bash
 ```
 
-Скрипт попросит вставить docker-compose.yml из Шага 1. Завершить ввод — `Ctrl+D`
-на пустой строке.
+⚠️ Pipe-способ **может тормозить или висеть** на некоторых системах из-за
+особенностей буферизации `sudo` + bash. Двухшаговый способ выше — надёжнее.
 
-**Альтернатива** с предзаписанным файлом (если нужно автоматизировать через
-Ansible / для CI):
+**Если у тебя уже сохранён compose-файл** (Ansible / CI / переустановка):
 
 ```bash
-# Сохранить docker-compose.yml на VPS любым способом (scp, через секрет-стор и т.п.)
-curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh -o /tmp/setup-node.sh
 sudo bash /tmp/setup-node.sh --compose-file /path/to/compose.yml
 ```
 
 ⚠️ **НЕ ИСПОЛЬЗУЙ** `sudo bash <(curl ...)` — sudo не наследует `/dev/fd`
 из подпроцесса, получишь ошибку `/dev/fd/63: No such file or directory`.
-Используй `curl | sudo bash` (через pipe) — это надёжный способ.
 
 ### Что скрипт делает
 
