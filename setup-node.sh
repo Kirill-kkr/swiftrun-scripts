@@ -41,17 +41,38 @@ set -euo pipefail
 
 # Если stdin не TTY (curl | bash сценарий), переоткроем его из /dev/tty
 # чтобы интерактивное чтение compose-файла работало нормально.
-if [ ! -t 0 ] && [ -r /dev/tty ]; then
-	exec < /dev/tty
+# Все ошибки попыток открыть /dev/tty (CI, контейнер без TTY) глушим в /dev/null.
+if [ ! -t 0 ]; then
+	{ exec < /dev/tty; } 2>/dev/null || true
+fi
+
+# Без буферизации — чтобы output моментально попадал в терминал
+# даже при запуске через curl | sudo bash. Sentinel защищает от
+# рекурсивного re-exec.
+if [ -z "${SETUP_NODE_UNBUFFERED:-}" ] && command -v stdbuf >/dev/null 2>&1; then
+	export SETUP_NODE_UNBUFFERED=1
+	exec stdbuf -oL -eL "$0" "$@" 0<&0
 fi
 
 NODE_DIR="/opt/remnanode"
 COMPOSE_FILE_FLAG=""
 
-log()    { printf '\033[36m[node]\033[0m %s\n' "$*"; }
-ok()     { printf '\033[32m[ ok ]\033[0m %s\n' "$*"; }
-warn()   { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
-fail()   { printf '\033[31m[FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
+# Цветной structured logging — каждое сообщение видно в реальном времени.
+log()    { printf '\033[36m▶\033[0m %s\n' "$*"; }
+ok()     { printf '\033[32m✓\033[0m %s\n' "$*"; }
+warn()   { printf '\033[33m⚠\033[0m %s\n' "$*"; }
+fail()   { printf '\033[31m✗ FAIL:\033[0m %s\n' "$*" >&2; exit 1; }
+step()   { printf '\n\033[1;36m━━━ %s ━━━\033[0m\n' "$*"; }
+
+# Hello banner — видно что скрипт реально стартанул.
+cat <<'EOF'
+
+╔══════════════════════════════════════════════════════════════════╗
+║  Swiftrun setup-node.sh — Remnawave-Node install                 ║
+║  https://github.com/Kirill-kkr/swiftrun-scripts                  ║
+╚══════════════════════════════════════════════════════════════════╝
+
+EOF
 
 # --- args ---
 while [ $# -gt 0 ]; do
@@ -69,79 +90,141 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+step "0/5 · Проверки окружения"
+
+log "проверяю права root…"
 if [ "$(id -u)" -ne 0 ]; then
-	fail "запускай через sudo"
+	fail "запускай через sudo: 'curl ... | sudo bash'"
 fi
+ok "root ✓"
+
+log "проверяю curl…"
 if ! command -v curl >/dev/null 2>&1; then
-	fail "нужен curl"
+	fail "curl не установлен. apt install curl"
+fi
+ok "curl ✓ ($(curl --version | head -1))"
+
+log "проверяю системные пакеты…"
+if command -v apt-get >/dev/null 2>&1; then
+	ok "Debian/Ubuntu detected"
+else
+	warn "не Debian/Ubuntu — get.docker.com может работать иначе"
 fi
 
 # --- 1. Docker ---
 
+step "1/5 · Docker"
+
 if ! command -v docker >/dev/null 2>&1; then
-	log "ставлю Docker (через get.docker.com)…"
-	curl -fsSL https://get.docker.com | sh
-	ok "Docker установлен"
+	log "Docker не найден — ставлю через get.docker.com (это займёт 30-90 сек)…"
+	echo
+	# get.docker.com сам пишет в stdout прогресс установки —
+	# не глушим, чтобы юзер видел что происходит.
+	curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+	sh /tmp/get-docker.sh
+	rm -f /tmp/get-docker.sh
+	echo
+	ok "Docker установлен ($(docker --version))"
 else
-	ok "Docker уже установлен"
+	ok "Docker уже установлен ($(docker --version))"
 fi
+
+log "проверяю docker compose plugin…"
+if ! docker compose version >/dev/null 2>&1; then
+	fail "docker compose plugin не работает. Возможно нужен апгрейд Docker"
+fi
+ok "docker compose ✓ ($(docker compose version --short))"
 
 # --- 2. Каталог ---
 
+step "2/5 · Создаю /opt/remnanode/"
+
+log "mkdir -p $NODE_DIR"
 mkdir -p "$NODE_DIR"
 cd "$NODE_DIR"
+ok "работаю в $(pwd)"
 
 # --- 3. compose.yml ---
 
+step "3/5 · docker-compose.yml"
+
 if [ -f docker-compose.yml ]; then
-	ok "docker-compose.yml уже существует — переподнимаю существующий стек"
+	ok "docker-compose.yml уже существует — переподниму существующий стек"
 else
 	if [ -n "$COMPOSE_FILE_FLAG" ]; then
 		# Скопировать из указанного path.
+		log "беру compose из $COMPOSE_FILE_FLAG"
 		[ -f "$COMPOSE_FILE_FLAG" ] || fail "файл не найден: $COMPOSE_FILE_FLAG"
 		cp "$COMPOSE_FILE_FLAG" docker-compose.yml
-		ok "compose-файл скопирован из $COMPOSE_FILE_FLAG"
+		ok "compose скопирован"
 	else
 		# Интерактивный режим — попросить оператора вставить.
 		cat <<'EOF'
 
-Вставь docker-compose.yml для этой ноды (скопирован из Remnawave admin UI).
-Завершить ввод: Ctrl+D на пустой строке.
+┌─────────────────────────────────────────────────────────────────┐
+│  ВСТАВЬ docker-compose.yml для этой ноды:                       │
+│                                                                 │
+│  1. Открой Remnawave admin: Nodes → Management → +              │
+│  2. Создай ноду, нажми «Copy docker-compose.yml»                │
+│  3. Вставь сюда (Cmd+V / Ctrl+Shift+V)                          │
+│  4. Нажми Enter, потом Ctrl+D на пустой строке                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+
+Ожидаю ввод…
 
 EOF
 		cat > docker-compose.yml
+		echo
 		[ -s docker-compose.yml ] || fail "пустой ввод; ничего не записано"
-		ok "compose-файл получен"
+		BYTES=$(wc -c < docker-compose.yml)
+		ok "compose получен ($BYTES байт)"
 	fi
 fi
 chmod 600 docker-compose.yml
 
 # Sanity-checks: убедимся, что файл выглядит как Remnawave-Node compose.
-if ! grep -qE 'image:\s*remnawave/node' docker-compose.yml; then
-	warn "в compose-файле нет 'image: remnawave/node' — проверь источник"
+log "проверяю содержимое compose…"
+if grep -qE 'image:\s*remnawave/node' docker-compose.yml; then
+	ok "image remnawave/node найден"
+else
+	warn "image 'remnawave/node' не найден — проверь что скопировал правильный compose"
 fi
-if ! grep -qE 'SECRET_KEY' docker-compose.yml; then
-	warn "в compose-файле не вижу SECRET_KEY — нода без секрета не подключится"
+
+if grep -qE 'SECRET_KEY' docker-compose.yml; then
+	ok "SECRET_KEY найден"
+else
+	warn "SECRET_KEY не найден — нода без секрета не подключится к панели"
 fi
 
 # --- 4. firewall hint ---
+step "4/5 · Firewall"
+
 NODE_PORT=$(grep -oE 'APP_PORT=[0-9]+' docker-compose.yml | head -1 | cut -d= -f2 || true)
 if [ -z "$NODE_PORT" ]; then
-	# Параметр иногда задан через environment, иногда через ports — попробуем достать из ports:
 	NODE_PORT=$(grep -oE '[0-9]+:[0-9]+' docker-compose.yml | head -1 | cut -d: -f1 || true)
 fi
 NODE_PORT="${NODE_PORT:-2222}"
 
-log "ожидаемый node port: $NODE_PORT (откой только для IP панели в ufw)"
+ok "node port: $NODE_PORT"
+log "после старта открой :443 (VLESS REALITY) и :$NODE_PORT (только с IP панели)"
 
 # --- 5. up ---
 
-log "docker compose pull…"
+step "5/5 · Docker compose up"
+
+log "docker compose pull (скачаю образ remnawave/node)…"
 docker compose pull
+echo
+
 log "docker compose up -d…"
 docker compose up -d
+echo
 
+log "жду 3 секунды чтобы контейнер инициализировался…"
 sleep 3
+
+log "статус контейнеров:"
 docker compose ps
 
 cat <<EOF
