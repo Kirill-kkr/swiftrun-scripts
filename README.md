@@ -180,7 +180,7 @@ mTLS-сертификатом), запускает контейнер.
 **Шаг 2** — на VPS под `root` (или через `sudo`):
 
 ```bash
-sudo bash <(curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh)
+curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh | sudo bash
 ```
 
 Скрипт попросит вставить docker-compose.yml из Шага 1. Завершить ввод — `Ctrl+D`
@@ -194,6 +194,10 @@ Ansible / для CI):
 curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh -o /tmp/setup-node.sh
 sudo bash /tmp/setup-node.sh --compose-file /path/to/compose.yml
 ```
+
+⚠️ **НЕ ИСПОЛЬЗУЙ** `sudo bash <(curl ...)` — sudo не наследует `/dev/fd`
+из подпроцесса, получишь ошибку `/dev/fd/63: No such file or directory`.
+Используй `curl | sudo bash` (через pipe) — это надёжный способ.
 
 ### Что скрипт делает
 

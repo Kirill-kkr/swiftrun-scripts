@@ -13,17 +13,23 @@
 #      без участия админа панели.
 #   4. docker compose up -d.
 #
-# Использование:
+# Использование (любой из двух способов работает):
 #
-#   # 1. В Remnawave admin UI: Nodes → Management → + → создать ноду →
-#   #    скопировать docker-compose.yml через кнопку «Copy».
-#   # 2. На ноде через ssh запустить:
+#   # Способ 1 — pipe в sudo bash (рекомендую):
+#   curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh | sudo bash
 #
-#   sudo bash <(curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh)
-#
-#   # или с предзаписанным compose-файлом:
+#   # Способ 2 — скачать и запустить отдельно:
 #   curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh -o /tmp/setup-node.sh
+#   sudo bash /tmp/setup-node.sh
+#   # или с предзаписанным compose-файлом:
 #   sudo bash /tmp/setup-node.sh --compose-file /tmp/node-compose.yml
+#
+# Скрипт сам разрулит stdin: если запущен через pipe (Способ 1), переоткроет
+# ввод из /dev/tty для интерактивной вставки compose-файла.
+#
+# ⚠️ `sudo bash <(curl ...)` НЕ работает — sudo не наследует /dev/fd из
+# подпроцесса (ошибка "/dev/fd/63: No such file or directory"). Используй
+# Способ 1 (`curl | sudo bash`) — он надёжный.
 #
 # Безопасность: docker-compose.yml содержит SECRET_KEY ноды (mTLS). Скрипт
 # принимает его ТОЛЬКО через stdin или --compose-file path; НИКОГДА через
@@ -32,6 +38,12 @@
 # где admin-пароль панели передавался через --panel-pass.
 
 set -euo pipefail
+
+# Если stdin не TTY (curl | bash сценарий), переоткроем его из /dev/tty
+# чтобы интерактивное чтение compose-файла работало нормально.
+if [ ! -t 0 ] && [ -r /dev/tty ]; then
+	exec < /dev/tty
+fi
 
 NODE_DIR="/opt/remnanode"
 COMPOSE_FILE_FLAG=""
