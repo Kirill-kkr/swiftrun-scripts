@@ -6,11 +6,13 @@
 # Делает:
 #   0. Проверки окружения (root, curl, Debian/Ubuntu)
 #   1. Docker + compose plugin
-#   2. BBR + FQ + TCP tuning (sysctl) — прирост throughput 10-30%
-#   3. UFW firewall — открыт :443 публично, :NODE_PORT только для panel IP
+#   2. BBR + FQ + TCP tuning + anti-DDoS sysctl (SYN cookies, rp_filter и т.д.)
+#   3. UFW firewall — :443 публично, :NODE_PORT только для panel IP, SSH rate-limit
 #   4. Fail2ban — защита SSH от brute-force (3 попытки → 24ч бан)
-#   5. /opt/remnanode/ + docker-compose.yml (от Remnawave admin UI)
-#   6. docker compose up -d
+#   5. SSH hardening (опционально, --harden-ssh) — создание админ-юзера,
+#      отключение root SSH + password auth
+#   6. /opt/remnanode/ + docker-compose.yml (от Remnawave admin UI)
+#   7. docker compose up -d
 #
 # Использование (двухшаговый — надёжный):
 #   curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh -o /tmp/setup-node.sh
@@ -47,6 +49,9 @@ PANEL_IP=""
 SKIP_TUNING=0
 SKIP_FIREWALL=0
 SKIP_FAIL2BAN=0
+HARDEN_SSH=0
+ADMIN_USER=""
+ADMIN_SSH_KEY=""
 
 # Логирование — структурированный output с цветами
 log()    { printf '\033[36m▶\033[0m %s\n' "$*"; }
@@ -90,6 +95,18 @@ while [ $# -gt 0 ]; do
 			SKIP_FAIL2BAN=1
 			shift
 			;;
+		--harden-ssh)
+			HARDEN_SSH=1
+			shift
+			;;
+		--admin-user)
+			ADMIN_USER="${2:?--admin-user требует имя}"
+			shift 2
+			;;
+		--admin-ssh-key)
+			ADMIN_SSH_KEY="${2:?--admin-ssh-key требует ключ или путь к файлу}"
+			shift 2
+			;;
 		-h|--help)
 			head -n 40 "$0"; exit 0
 			;;
@@ -100,7 +117,7 @@ while [ $# -gt 0 ]; do
 done
 
 # =========================================================================
-step "0/6 · Проверки окружения"
+step "0/7 · Проверки окружения"
 # =========================================================================
 
 log "проверяю права root…"
@@ -123,7 +140,7 @@ else
 fi
 
 # =========================================================================
-step "1/6 · Docker"
+step "1/7 · Docker"
 # =========================================================================
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -145,7 +162,7 @@ fi
 ok "docker compose ✓ ($(docker compose version --short))"
 
 # =========================================================================
-step "2/6 · BBR + TCP tuning"
+step "2/7 · BBR + TCP tuning"
 # =========================================================================
 
 if [ $SKIP_TUNING -eq 1 ]; then
@@ -189,6 +206,55 @@ net.netfilter.nf_conntrack_tcp_timeout_established = 7200
 
 # IPv6 — оставляем включённым (Hetzner и др. дают /64 бесплатно)
 net.ipv6.conf.all.disable_ipv6 = 0
+
+# ============================================================
+# Anti-DDoS hardening (kernel-level защита)
+# ============================================================
+
+# SYN flood защита
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_synack_retries = 2
+net.ipv4.tcp_syn_retries = 3
+
+# RFC 1337: защита от TIME_WAIT assassination attacks
+net.ipv4.tcp_rfc1337 = 1
+
+# Reverse path filtering — отбрасываем пакеты с поддельным src IP
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# Игнорируем source routing (потенциальный вектор атак)
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+
+# Игнорируем ICMP redirects (атаки man-in-the-middle)
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+
+# Не отправляем ICMP redirects (мы не роутер)
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+
+# Smurf attack защита — игнор broadcast ICMP
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+
+# Игнор bogus ICMP error responses
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+# ICMP rate limit — против ping flood
+net.ipv4.icmp_ratelimit = 100
+net.ipv4.icmp_ratemask = 88089
+
+# Логируем мартианские (spoofed) пакеты
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
 SYSCTL
 
 	log "применяю sysctl…"
@@ -206,7 +272,7 @@ SYSCTL
 fi
 
 # =========================================================================
-step "3/6 · Firewall (UFW)"
+step "3/7 · Firewall (UFW)"
 # =========================================================================
 
 # Получаем NODE_PORT заранее (из compose если уже есть, иначе дефолт 2222)
@@ -246,9 +312,10 @@ else
 	ufw default deny incoming >/dev/null
 	ufw default allow outgoing >/dev/null
 
-	# SSH — обязательно прежде чем включить ufw (чтоб не отрубить себя)
-	log "разрешаю SSH (22/tcp)"
-	ufw allow 22/tcp >/dev/null
+	# SSH — обязательно прежде чем включить ufw (чтоб не отрубить себя).
+	# 'ufw limit' = block IP который делает >6 попыток за 30 сек.
+	log "разрешаю SSH (22/tcp) + rate-limit (6 conn/30s per IP)"
+	ufw limit 22/tcp >/dev/null
 
 	# VPN-трафик — публичный
 	log "разрешаю :443 (VLESS REALITY public)"
@@ -269,7 +336,7 @@ else
 fi
 
 # =========================================================================
-step "4/6 · Fail2ban (защита SSH)"
+step "4/7 · Fail2ban (защита SSH)"
 # =========================================================================
 
 if [ $SKIP_FAIL2BAN -eq 1 ]; then
@@ -310,7 +377,145 @@ JAIL
 fi
 
 # =========================================================================
-step "5/6 · docker-compose.yml"
+step "5/7 · SSH hardening (опционально)"
+# =========================================================================
+
+# Создание non-root admin-юзера + отключение root SSH + password auth.
+# Делается только если --harden-ssh передан, или интерактивно подтверждено.
+
+SHOULD_HARDEN=0
+if [ $HARDEN_SSH -eq 1 ]; then
+	SHOULD_HARDEN=1
+elif [ -t 0 ] || { [ -e /dev/tty ] && [ -r /dev/tty ]; }; then
+	echo
+	echo "Хочешь создать non-root админ-юзера + отключить root SSH login?"
+	echo "  ⚠️ Если ssh-ключ настроен неправильно — можешь остаться без доступа!"
+	echo "  Можно пропустить и сделать позже:"
+	echo "    sudo bash $0 --harden-ssh --admin-user kirill --admin-ssh-key /tmp/key.pub"
+	printf "Захарденить SSH? [y/N]: "
+	read -r ANSWER < /dev/tty 2>/dev/null || ANSWER=""
+	echo
+	[ "$ANSWER" = "y" ] || [ "$ANSWER" = "Y" ] || [ "$ANSWER" = "yes" ] && SHOULD_HARDEN=1
+fi
+
+if [ $SHOULD_HARDEN -eq 0 ]; then
+	warn "пропускаю SSH hardening (передай --harden-ssh чтобы включить)"
+else
+	# Имя юзера
+	if [ -z "$ADMIN_USER" ]; then
+		printf "Имя нового admin-юзера [admin]: "
+		read -r ADMIN_USER < /dev/tty 2>/dev/null || ADMIN_USER=""
+		ADMIN_USER="${ADMIN_USER:-admin}"
+	fi
+
+	# Валидация имени
+	if ! echo "$ADMIN_USER" | grep -qE '^[a-z_][a-z0-9_-]{0,30}$'; then
+		fail "недопустимое имя юзера: $ADMIN_USER (только lowercase, цифры, -, _)"
+	fi
+
+	# SSH key
+	if [ -z "$ADMIN_SSH_KEY" ]; then
+		echo
+		echo "Вставь свой SSH публичный ключ (одна строка, начинается с 'ssh-ed25519' или 'ssh-rsa')."
+		echo "На маке его взять: cat ~/.ssh/id_ed25519.pub"
+		echo "Если нет — сгенерь: ssh-keygen -t ed25519"
+		echo
+		printf "Ключ: "
+		read -r ADMIN_SSH_KEY < /dev/tty 2>/dev/null || ADMIN_SSH_KEY=""
+		echo
+	elif [ -f "$ADMIN_SSH_KEY" ]; then
+		ADMIN_SSH_KEY=$(cat "$ADMIN_SSH_KEY")
+	fi
+
+	# Валидация ключа
+	if ! echo "$ADMIN_SSH_KEY" | grep -qE '^(ssh-rsa|ssh-ed25519|ecdsa-sha2-) '; then
+		fail "не похоже на SSH key: '$ADMIN_SSH_KEY' (должен начинаться с 'ssh-rsa', 'ssh-ed25519' или 'ecdsa-sha2-')"
+	fi
+
+	# Создание юзера
+	if id "$ADMIN_USER" >/dev/null 2>&1; then
+		ok "юзер $ADMIN_USER уже существует"
+	else
+		log "создаю юзера $ADMIN_USER"
+		useradd -m -s /bin/bash "$ADMIN_USER"
+		ok "юзер $ADMIN_USER создан"
+	fi
+
+	log "добавляю $ADMIN_USER в группу sudo"
+	usermod -aG sudo "$ADMIN_USER"
+
+	# Sudo без пароля (т.к. password auth скоро отключим)
+	log "разрешаю sudo без пароля для $ADMIN_USER"
+	echo "$ADMIN_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/swiftrun-$ADMIN_USER"
+	chmod 0440 "/etc/sudoers.d/swiftrun-$ADMIN_USER"
+
+	# SSH key
+	log "ставлю SSH key для $ADMIN_USER"
+	USER_SSH_DIR="/home/$ADMIN_USER/.ssh"
+	mkdir -p "$USER_SSH_DIR"
+	chmod 700 "$USER_SSH_DIR"
+	echo "$ADMIN_SSH_KEY" > "$USER_SSH_DIR/authorized_keys"
+	chmod 600 "$USER_SSH_DIR/authorized_keys"
+	chown -R "$ADMIN_USER:$ADMIN_USER" "$USER_SSH_DIR"
+	ok "SSH key установлен"
+
+	# Перед отключением root — попросить проверить
+	PUBLIC_IP_TMP=$(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "<твой IP>")
+	echo
+	cat <<EOF
+┌─────────────────────────────────────────────────────────────────┐
+│  ⚠️ ПРОВЕРЬ В ДРУГОМ ТЕРМИНАЛЕ что новый юзер работает:         │
+│                                                                 │
+│    ssh $ADMIN_USER@$PUBLIC_IP_TMP
+│    sudo whoami    # должно вывести: root                        │
+│                                                                 │
+│  Если работает — продолжаем (отключим root SSH и password).     │
+│  Если НЕ работает — НЕ продолжай! Откатишь и переделаешь.       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+EOF
+	printf "Войти под %s удалось? Отключить root SSH? [y/N]: " "$ADMIN_USER"
+	read -r CONFIRM < /dev/tty 2>/dev/null || CONFIRM="n"
+	echo
+
+	if [ "$CONFIRM" = "y" ] || [ "$CONFIRM" = "Y" ] || [ "$CONFIRM" = "yes" ]; then
+		log "правлю /etc/ssh/sshd_config — отключаю root + password auth"
+
+		# Backup
+		cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.backup-$(date +%Y%m%d-%H%M%S)"
+
+		# Apply via drop-in (Debian 12+ / Ubuntu 22.04+ поддерживают sshd_config.d)
+		mkdir -p /etc/ssh/sshd_config.d
+		cat > /etc/ssh/sshd_config.d/99-swiftrun-hardening.conf <<HARDEN
+# Swiftrun-VPN node SSH hardening — managed by setup-node.sh
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+HARDEN
+
+		# На случай если drop-in не поддерживается — заменим в основном файле
+		if ! grep -q 'Include /etc/ssh/sshd_config.d/\*.conf' /etc/ssh/sshd_config 2>/dev/null; then
+			sed -i -E 's|^#?PermitRootLogin.*|PermitRootLogin no|; s|^#?PasswordAuthentication.*|PasswordAuthentication no|; s|^#?PubkeyAuthentication.*|PubkeyAuthentication yes|' /etc/ssh/sshd_config
+		fi
+
+		log "тестирую конфиг sshd…"
+		if ! sshd -t 2>/dev/null; then
+			fail "sshd config invalid! НЕ перезапускаю SSH, откатываю drop-in"
+		fi
+
+		log "перезапускаю sshd…"
+		systemctl restart sshd || systemctl restart ssh
+		ok "SSH hardened: root login отключён, password auth отключён"
+		warn "ВАЖНО: проверь что всё ещё можешь зайти как $ADMIN_USER в новой ssh-сессии"
+	else
+		warn "пропускаю отключение root — юзер $ADMIN_USER создан, можешь использовать"
+	fi
+fi
+
+# =========================================================================
+step "6/7 · docker-compose.yml"
 # =========================================================================
 
 log "mkdir -p $NODE_DIR"
@@ -373,7 +578,7 @@ if [ -n "$NEW_NODE_PORT" ] && [ "$NEW_NODE_PORT" != "$NODE_PORT" ]; then
 fi
 
 # =========================================================================
-step "6/6 · Docker compose up"
+step "7/7 · Docker compose up"
 # =========================================================================
 
 log "docker compose pull (скачаю remnawave/node)…"

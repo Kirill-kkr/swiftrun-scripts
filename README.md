@@ -164,13 +164,15 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scr
 
 ## `setup-node.sh` — установка + оптимизация + защита Remnawave-Node
 
-Полный комбайн для свежей VPS:
+Полный комбайн для свежей VPS — 7 шагов одним скриптом:
+
 1. **Docker** + compose plugin
-2. **BBR + TCP tuning** (sysctl) — прирост throughput 10-30% на международных маршрутах
-3. **UFW firewall** — `:443` публично, `:NODE_PORT` только для IP панели, остальное deny
+2. **BBR + TCP tuning + Anti-DDoS sysctl** — прирост throughput 10-30%, защита от SYN flood / port scan / spoofing
+3. **UFW firewall** — `:443` публично, `:NODE_PORT` только для IP панели, SSH rate-limited, остальное deny
 4. **Fail2ban** — защита SSH от brute-force (3 попытки/10 мин → бан на 24ч)
-5. **`/opt/remnanode/`** + docker-compose.yml (с embedded SECRET_KEY от Remnawave admin)
-6. **`docker compose up -d`** — запуск ноды
+5. **SSH hardening** (опционально) — создание non-root admin-юзера + отключение root SSH + password auth
+6. **`/opt/remnanode/`** + docker-compose.yml (с embedded SECRET_KEY от Remnawave admin)
+7. **`docker compose up -d`** — запуск ноды
 
 Полностью идемпотентен — повторный запуск пропускает уже сделанное.
 
@@ -203,14 +205,43 @@ sudo bash /tmp/setup-node.sh
 sudo bash /tmp/setup-node.sh --panel-ip 1.2.3.4
 ```
 
+**SSH hardening** — отдельно (опционально, скрипт спросит интерактивно):
+
+```bash
+sudo bash /tmp/setup-node.sh \
+  --harden-ssh \
+  --admin-user kirill \
+  --admin-ssh-key "$(cat ~/.ssh/id_ed25519.pub)"
+```
+
+Или передай путь к файлу:
+```bash
+sudo bash /tmp/setup-node.sh --harden-ssh --admin-user kirill --admin-ssh-key /tmp/key.pub
+```
+
+Скрипт:
+1. Создаст non-root юзера `kirill` с переданным SSH-ключом
+2. Добавит его в группу sudo (sudo без пароля, т.к. password auth отключится)
+3. Спросит подтверждение что ты проверил вход новым юзером
+4. **После твоего "y"** — отключит root SSH login и password auth
+
+⚠️ **Перед подтверждением — ОБЯЗАТЕЛЬНО проверь в другом терминале:**
+```bash
+ssh kirill@<VPS_IP>
+sudo whoami    # должно вывести: root
+```
+
+Если SSH ключ был передан с опечаткой и `ssh kirill@...` не пускает — НЕ подтверждай отключение root. Иначе остаёшься без доступа.
+
 **Пропустить отдельные этапы:**
 
 | Флаг | Что пропустит |
 |---|---|
-| `--skip-tuning` | sysctl/BBR настройки |
+| `--skip-tuning` | sysctl/BBR/anti-DDoS настройки |
 | `--skip-firewall` | UFW |
 | `--skip-fail2ban` | fail2ban |
 | `--compose-file <path>` | Не спрашивать compose интерактивно |
+| `--harden-ssh` | Принудительно делать SSH hardening (по умолчанию спрашивает) |
 
 Например, обновить только firewall с новым IP панели:
 
@@ -247,6 +278,26 @@ curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/se
 ss -tin | grep bbr | head -5
 sysctl net.ipv4.tcp_congestion_control
 ```
+
+### Anti-DDoS / kernel hardening
+
+Скрипт применяет защитные sysctl-параметры:
+
+| Параметр | Защита от |
+|---|---|
+| `tcp_syncookies = 1` | SYN flood — резервная защита когда SYN-queue переполнен |
+| `tcp_max_syn_backlog = 8192` | SYN queue — больше pending connections |
+| `tcp_rfc1337 = 1` | TIME_WAIT assassination attacks |
+| `rp_filter = 1` | Spoofed packets (поддельный src IP) |
+| `accept_source_route = 0` | Source routing attacks |
+| `accept_redirects = 0` | ICMP redirects (man-in-the-middle) |
+| `icmp_echo_ignore_broadcasts = 1` | Smurf attacks |
+| `icmp_ratelimit = 100` | Ping flood |
+| `log_martians = 1` | Логируем подозрительные пакеты |
+
+Бонус: UFW `limit ssh` блокирует IP при >6 SSH-попытках за 30 сек (rate limit).
+Это дополняет fail2ban — он реактивный (после 3 fail входов), `ufw limit`
+проактивный (по объёму попыток).
 
 ### Что даёт Fail2ban
 
