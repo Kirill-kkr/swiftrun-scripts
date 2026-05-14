@@ -46,13 +46,9 @@ if [ ! -t 0 ]; then
 	{ exec < /dev/tty; } 2>/dev/null || true
 fi
 
-# Без буферизации — чтобы output моментально попадал в терминал
-# даже при запуске через curl | sudo bash. Sentinel защищает от
-# рекурсивного re-exec.
-if [ -z "${SETUP_NODE_UNBUFFERED:-}" ] && command -v stdbuf >/dev/null 2>&1; then
-	export SETUP_NODE_UNBUFFERED=1
-	exec stdbuf -oL -eL "$0" "$@" 0<&0
-fi
+# Стандартного bash-вывода (printf, echo) достаточно — он line-buffered
+# на интерактивных терминалах. stdbuf re-exec не нужен и ломается при
+# pipe-режиме ($0 = bash, не путь к скрипту).
 
 NODE_DIR="/opt/remnanode"
 COMPOSE_FILE_FLAG=""
