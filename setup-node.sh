@@ -313,9 +313,11 @@ else
 	ufw default allow outgoing >/dev/null
 
 	# SSH — обязательно прежде чем включить ufw (чтоб не отрубить себя).
-	# 'ufw limit' = block IP который делает >6 попыток за 30 сек.
-	log "разрешаю SSH (22/tcp) + rate-limit (6 conn/30s per IP)"
-	ufw limit 22/tcp >/dev/null
+	# Простой allow без rate-limit: для legitimate сценариев (tmux reconnect,
+	# ansible с параллельными форками) `ufw limit` бывает слишком агрессивен.
+	# От brute-force защищает fail2ban (см. шаг 4/7).
+	log "разрешаю SSH (22/tcp)"
+	ufw allow 22/tcp >/dev/null
 
 	# VPN-трафик — публичный
 	log "разрешаю :443 (VLESS REALITY public)"

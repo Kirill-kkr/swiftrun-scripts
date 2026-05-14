@@ -295,9 +295,10 @@ sysctl net.ipv4.tcp_congestion_control
 | `icmp_ratelimit = 100` | Ping flood |
 | `log_martians = 1` | Логируем подозрительные пакеты |
 
-Бонус: UFW `limit ssh` блокирует IP при >6 SSH-попытках за 30 сек (rate limit).
-Это дополняет fail2ban — он реактивный (после 3 fail входов), `ufw limit`
-проактивный (по объёму попыток).
+SSH-порт 22 открыт через простой `ufw allow` (без `limit`). От brute-force
+защищает fail2ban (3 fail попытки/10 мин → бан на 24ч). `ufw limit` отключён
+намеренно — он может блокировать легитимные сценарии типа tmux-reconnect
+или ansible параллельных подключений.
 
 ### Что даёт Fail2ban
 
