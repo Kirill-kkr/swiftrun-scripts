@@ -162,12 +162,17 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scr
 
 ---
 
-## `setup-node.sh` — Remnawave-Node
+## `setup-node.sh` — установка + оптимизация + защита Remnawave-Node
 
-Поднимает [Remnawave-Node](https://github.com/remnawave/node) на свежей VPS:
-устанавливает Docker, создаёт `/opt/remnanode/`, принимает docker-compose.yml
-от оператора (он генерируется в Remnawave admin UI с embedded SECRET_KEY +
-mTLS-сертификатом), запускает контейнер.
+Полный комбайн для свежей VPS:
+1. **Docker** + compose plugin
+2. **BBR + TCP tuning** (sysctl) — прирост throughput 10-30% на международных маршрутах
+3. **UFW firewall** — `:443` публично, `:NODE_PORT` только для IP панели, остальное deny
+4. **Fail2ban** — защита SSH от brute-force (3 попытки/10 мин → бан на 24ч)
+5. **`/opt/remnanode/`** + docker-compose.yml (с embedded SECRET_KEY от Remnawave admin)
+6. **`docker compose up -d`** — запуск ноды
+
+Полностью идемпотентен — повторный запуск пропускает уже сделанное.
 
 ### Использование
 
@@ -184,8 +189,34 @@ curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/se
 sudo bash /tmp/setup-node.sh
 ```
 
-Скрипт покажет banner и попросит вставить docker-compose.yml из Шага 1.
-Завершить ввод — `Ctrl+D` на пустой строке.
+Скрипт покажет banner и пошагово:
+1. Поставит Docker (если нет)
+2. Применит BBR + TCP tuning
+3. Спросит IP панели и настроит UFW
+4. Поставит fail2ban
+5. Попросит вставить docker-compose.yml (Ctrl+D в конце)
+6. Запустит ноду
+
+**Сразу с IP панели** (избегает интерактивного вопроса):
+
+```bash
+sudo bash /tmp/setup-node.sh --panel-ip 1.2.3.4
+```
+
+**Пропустить отдельные этапы:**
+
+| Флаг | Что пропустит |
+|---|---|
+| `--skip-tuning` | sysctl/BBR настройки |
+| `--skip-firewall` | UFW |
+| `--skip-fail2ban` | fail2ban |
+| `--compose-file <path>` | Не спрашивать compose интерактивно |
+
+Например, обновить только firewall с новым IP панели:
+
+```bash
+sudo bash /tmp/setup-node.sh --panel-ip <NEW_IP> --skip-tuning --skip-fail2ban
+```
 
 **Альтернатива одной командой через pipe:**
 
@@ -196,14 +227,38 @@ curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/se
 ⚠️ Pipe-способ **может тормозить или висеть** на некоторых системах из-за
 особенностей буферизации `sudo` + bash. Двухшаговый способ выше — надёжнее.
 
-**Если у тебя уже сохранён compose-файл** (Ansible / CI / переустановка):
-
-```bash
-sudo bash /tmp/setup-node.sh --compose-file /path/to/compose.yml
-```
-
 ⚠️ **НЕ ИСПОЛЬЗУЙ** `sudo bash <(curl ...)` — sudo не наследует `/dev/fd`
 из подпроцесса, получишь ошибку `/dev/fd/63: No such file or directory`.
+
+### Что даёт BBR + TCP tuning
+
+- **BBR** (Bottleneck Bandwidth and RTT) — современный congestion control от Google.
+  Заменяет старый CUBIC. Прирост throughput на международных маршрутах:
+  - С Hetzner Германия → RU: +20-30%
+  - С Aeza Москва → RU: +5-10%
+- **FQ qdisc** — fair queueing, не даёт одному жадному соединению захватить весь канал
+- **TCP Fast Open** — экономит 1 RTT на каждом новом соединении
+- **Conntrack table** = 524k — поддержка до 100k одновременных VPN-сессий
+- **TCP buffers 64 MiB** — для high-bandwidth gigabit links
+
+Проверить что BBR работает после запуска:
+
+```bash
+ss -tin | grep bbr | head -5
+sysctl net.ipv4.tcp_congestion_control
+```
+
+### Что даёт Fail2ban
+
+Защищает только **SSH** (порт 22). VPN-трафик на :443 не трогается —
+там тысячи юзеров с разных IP, бан был бы вреден.
+
+После 3 неудачных попыток SSH с одного IP за 10 минут — бан на 24 часа:
+
+```bash
+fail2ban-client status sshd       # сколько IP забанено
+fail2ban-client unban <IP>        # разбанить вручную если случайно
+```
 
 ### Что скрипт делает
 
