@@ -455,12 +455,20 @@ else
 		fail "не похоже на SSH key: '$ADMIN_SSH_KEY' (должен начинаться с 'ssh-rsa', 'ssh-ed25519' или 'ecdsa-sha2-')"
 	fi
 
-	# Создание юзера
+	# Создание юзера. Обрабатываем случай когда группа с тем же именем
+	# уже существует (legacy 'admin' group на Debian/Ubuntu, и т.п.).
 	if id "$ADMIN_USER" >/dev/null 2>&1; then
 		ok "юзер $ADMIN_USER уже существует"
 	else
 		log "создаю юзера $ADMIN_USER"
-		useradd -m -s /bin/bash "$ADMIN_USER"
+		if getent group "$ADMIN_USER" >/dev/null 2>&1; then
+			# Группа с таким именем уже есть — используем её как primary
+			log "(используется существующая группа $ADMIN_USER)"
+			useradd -m -s /bin/bash -g "$ADMIN_USER" "$ADMIN_USER"
+		else
+			# Нет группы — useradd создаст её сам (стандартное поведение)
+			useradd -m -s /bin/bash "$ADMIN_USER"
+		fi
 		ok "юзер $ADMIN_USER создан"
 	fi
 
