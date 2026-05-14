@@ -170,12 +170,27 @@ if [ $SKIP_TUNING -eq 1 ]; then
 else
 	SYSCTL_FILE="/etc/sysctl.d/99-swiftrun-node.conf"
 
+	# Загружаем модули. cake — лучше fq (anti-bufferbloat + AQM), но требует
+	# sch_cake (есть в ядрах 4.19+). Если cake не доступен — fallback на fq.
+	log "загружаю kernel modules tcp_bbr + sch_cake"
+	modprobe tcp_bbr 2>/dev/null || true
+	modprobe sch_cake 2>/dev/null || true
+
+	# Выбираем qdisc: cake > fq
+	if [ -d /sys/module/sch_cake ] || modinfo sch_cake >/dev/null 2>&1; then
+		QDISC="cake"
+		ok "будет использован qdisc=cake (анти-bufferbloat, AQM)"
+	else
+		QDISC="fq"
+		warn "sch_cake недоступен — fallback на fq (нормально, просто без AQM)"
+	fi
+
 	log "пишу $SYSCTL_FILE"
-	cat > "$SYSCTL_FILE" <<'SYSCTL'
+	cat > "$SYSCTL_FILE" <<SYSCTL
 # Swiftrun-VPN node optimization — managed by setup-node.sh
 
-# BBR + FQ — современный TCP congestion control (требует ядро 4.9+)
-net.core.default_qdisc = fq
+# BBR + ${QDISC^^} — современный TCP congestion control + smart qdisc
+net.core.default_qdisc = $QDISC
 net.ipv4.tcp_congestion_control = bbr
 
 # TCP buffer sizes — для high-bandwidth links
@@ -268,7 +283,13 @@ SYSCTL
 	else
 		warn "BBR не активен (текущий: $CURRENT_CC) — попробуй: modprobe tcp_bbr"
 	fi
-	ok "default qdisc = $CURRENT_QDISC"
+	if [ "$CURRENT_QDISC" = "cake" ]; then
+		ok "qdisc = cake (анти-bufferbloat ✓ AQM ✓ fair queueing ✓)"
+	elif [ "$CURRENT_QDISC" = "fq" ]; then
+		ok "qdisc = fq (fair queueing, без AQM)"
+	else
+		warn "qdisc = $CURRENT_QDISC (неожиданно)"
+	fi
 fi
 
 # =========================================================================

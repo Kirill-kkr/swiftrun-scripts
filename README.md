@@ -267,7 +267,10 @@ curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/se
   Заменяет старый CUBIC. Прирост throughput на международных маршрутах:
   - С Hetzner Германия → RU: +20-30%
   - С Aeza Москва → RU: +5-10%
-- **FQ qdisc** — fair queueing, не даёт одному жадному соединению захватить весь канал
+- **Cake qdisc** (или fq fallback) — умный qdisc с anti-bufferbloat + AQM + fair queueing.
+  Снижает latency под нагрузкой. Если sch_cake модуль не доступен (старое
+  ядро) — скрипт автоматически откатится на fq. На современных VPS (Hetzner,
+  Aeza, etc) cake доступен из коробки.
 - **TCP Fast Open** — экономит 1 RTT на каждом новом соединении
 - **Conntrack table** = 524k — поддержка до 100k одновременных VPN-сессий
 - **TCP buffers 64 MiB** — для high-bandwidth gigabit links
