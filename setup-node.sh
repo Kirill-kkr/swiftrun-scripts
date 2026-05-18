@@ -13,6 +13,7 @@
 #      отключение root SSH + password auth
 #   6. /opt/remnanode/ + docker-compose.yml (от Remnawave admin UI)
 #   7. docker compose up -d
+#   8. Autoheal watchdog + daily cron restart (xray hangs со временем → авто-rebooot)
 #
 # Использование (двухшаговый — надёжный):
 #   curl -fsSL https://raw.githubusercontent.com/Kirill-kkr/swiftrun-scripts/main/setup-node.sh -o /tmp/setup-node.sh
@@ -28,6 +29,11 @@
 #   --skip-tuning      без sysctl/BBR
 #   --skip-firewall    без UFW
 #   --skip-fail2ban    без fail2ban
+#   --skip-autoheal    без watchdog-контейнера и cron-рестарта
+#
+# Тюнинг autoheal:
+#   --autoheal-interval N    интервал проверки в секундах (default 30)
+#   --daily-restart-hour N   час daily-рестарта 0-23 (default 4)
 #
 # Идемпотентен — повторный запуск пропустит уже сделанное.
 #
@@ -49,9 +55,12 @@ PANEL_IP=""
 SKIP_TUNING=0
 SKIP_FIREWALL=0
 SKIP_FAIL2BAN=0
+SKIP_AUTOHEAL=0
 HARDEN_SSH=0
 ADMIN_USER=""
 ADMIN_SSH_KEY=""
+AUTOHEAL_INTERVAL=30
+DAILY_RESTART_HOUR=4
 
 # Логирование — структурированный output с цветами
 log()    { printf '\033[36m▶\033[0m %s\n' "$*"; }
@@ -95,6 +104,18 @@ while [ $# -gt 0 ]; do
 			SKIP_FAIL2BAN=1
 			shift
 			;;
+		--skip-autoheal)
+			SKIP_AUTOHEAL=1
+			shift
+			;;
+		--autoheal-interval)
+			AUTOHEAL_INTERVAL="${2:?--autoheal-interval требует секунды}"
+			shift 2
+			;;
+		--daily-restart-hour)
+			DAILY_RESTART_HOUR="${2:?--daily-restart-hour требует час 0-23}"
+			shift 2
+			;;
 		--harden-ssh)
 			HARDEN_SSH=1
 			shift
@@ -117,7 +138,7 @@ while [ $# -gt 0 ]; do
 done
 
 # =========================================================================
-step "0/7 · Проверки окружения"
+step "0/8 · Проверки окружения"
 # =========================================================================
 
 log "проверяю права root…"
@@ -140,7 +161,7 @@ else
 fi
 
 # =========================================================================
-step "1/7 · Docker"
+step "1/8 · Docker"
 # =========================================================================
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -162,7 +183,7 @@ fi
 ok "docker compose ✓ ($(docker compose version --short))"
 
 # =========================================================================
-step "2/7 · BBR + TCP tuning"
+step "2/8 · BBR + TCP tuning"
 # =========================================================================
 
 if [ $SKIP_TUNING -eq 1 ]; then
@@ -293,7 +314,7 @@ SYSCTL
 fi
 
 # =========================================================================
-step "3/7 · Firewall (UFW)"
+step "3/8 · Firewall (UFW)"
 # =========================================================================
 
 # Получаем NODE_PORT заранее (из compose если уже есть, иначе дефолт 2222)
@@ -359,7 +380,7 @@ else
 fi
 
 # =========================================================================
-step "4/7 · Fail2ban (защита SSH)"
+step "4/8 · Fail2ban (защита SSH)"
 # =========================================================================
 
 if [ $SKIP_FAIL2BAN -eq 1 ]; then
@@ -400,7 +421,7 @@ JAIL
 fi
 
 # =========================================================================
-step "5/7 · SSH hardening (опционально)"
+step "5/8 · SSH hardening (опционально)"
 # =========================================================================
 
 # Создание non-root admin-юзера + отключение root SSH + password auth.
@@ -546,7 +567,7 @@ HARDEN
 fi
 
 # =========================================================================
-step "6/7 · docker-compose.yml"
+step "6/8 · docker-compose.yml"
 # =========================================================================
 
 log "mkdir -p $NODE_DIR"
@@ -609,7 +630,7 @@ if [ -n "$NEW_NODE_PORT" ] && [ "$NEW_NODE_PORT" != "$NODE_PORT" ]; then
 fi
 
 # =========================================================================
-step "7/7 · Docker compose up"
+step "7/8 · Docker compose up"
 # =========================================================================
 
 log "docker compose pull (скачаю remnawave/node)…"
@@ -625,6 +646,115 @@ sleep 3
 
 log "статус контейнеров:"
 docker compose ps
+
+# =========================================================================
+step "8/8 · Autoheal watchdog + daily restart"
+# =========================================================================
+#
+# xray-сервер в remnanode со временем накапливает state и подвисает —
+# юзеры жалуются на "вышибает", рестарт чинит. Решаем двумя слоями:
+#
+#   1. autoheal-контейнер (watchdog) — мониторит healthcheck и рестартит
+#      unhealthy контейнеры. Реагирует за 30 секунд.
+#
+#   2. Daily cron restart в 4 утра — превентивно сбрасывает накопленный
+#      state и утечки памяти, юзеры спят.
+
+if [ $SKIP_AUTOHEAL -eq 1 ]; then
+	warn "пропущено по --skip-autoheal"
+else
+	# --- 8.1 Patch docker-compose.yml: label + healthcheck для remnanode ---
+	#
+	# autoheal мониторит ТОЛЬКО контейнеры с label "autoheal=true". Также
+	# нужен healthcheck — без него autoheal не понимает что контейнер
+	# нездоров. Делаем через docker-compose.override.yml — чисто и
+	# идемпотентно (не трогаем основной compose от Remnawave).
+
+	OVERRIDE_FILE="$NODE_DIR/docker-compose.override.yml"
+
+	# Определяем имя сервиса remnanode (может отличаться от 'remnanode' если
+	# Remnawave admin сгенерил с другим именем).
+	NODE_SVC=$(grep -E '^[[:space:]]*[a-z_-]+:[[:space:]]*$' "$NODE_DIR/docker-compose.yml" 2>/dev/null \
+		| grep -iE 'node|remna' \
+		| head -1 \
+		| sed -E 's/^[[:space:]]*([a-z_-]+):.*$/\1/' \
+		|| echo "remnanode")
+	[ -z "$NODE_SVC" ] && NODE_SVC="remnanode"
+	log "сервис ноды в compose: $NODE_SVC"
+
+	log "пишу $OVERRIDE_FILE — добавляю label + healthcheck"
+	cat > "$OVERRIDE_FILE" <<OVERRIDE
+# Добавлено swiftrun setup-node.sh — управляет autoheal + healthcheck
+# Не трогает основной docker-compose.yml (можно безопасно обновлять).
+services:
+  $NODE_SVC:
+    labels:
+      autoheal: "true"
+    healthcheck:
+      # Простая проверка: слушается ли node-порт.
+      # remnanode-контейнер обычно имеет nc/busybox внутри.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${NODE_PORT:-2222} || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+OVERRIDE
+	ok "override.yml создан"
+
+	# --- 8.2 Запуск/обновление autoheal-контейнера ---
+
+	log "проверяю autoheal-контейнер…"
+	if docker ps -a --format '{{.Names}}' | grep -qE '^autoheal$'; then
+		log "autoheal уже есть — пересоздаю с актуальными настройками"
+		docker rm -f autoheal >/dev/null 2>&1 || true
+	fi
+
+	log "ставлю autoheal-watchdog (will rstart unhealthy containers)…"
+	docker run -d \
+		--name autoheal \
+		--restart=always \
+		-e AUTOHEAL_CONTAINER_LABEL=autoheal \
+		-e AUTOHEAL_INTERVAL="$AUTOHEAL_INTERVAL" \
+		-e AUTOHEAL_DEFAULT_STOP_TIMEOUT=10 \
+		-v /var/run/docker.sock:/var/run/docker.sock \
+		willfarrell/autoheal:latest >/dev/null
+	ok "autoheal запущен (interval=${AUTOHEAL_INTERVAL}s)"
+
+	# --- 8.3 Применить override (recreate node-контейнера) ---
+
+	log "recreate ноды с новым healthcheck…"
+	cd "$NODE_DIR"
+	docker compose up -d "$NODE_SVC"
+	cd - >/dev/null
+
+	# --- 8.4 Daily restart cron ---
+	#
+	# Дополнительная страховка от утечек памяти / накопленного state.
+	# В 4 утра (по времени сервера) пиники рестартуют ноду. Юзеры в это
+	# время в основном спят, downtime ~5 секунд.
+
+	CRON_FILE="/etc/cron.d/swiftrun-remnanode-daily-restart"
+	log "пишу $CRON_FILE (рестарт в $(printf '%02d' "$DAILY_RESTART_HOUR"):00)"
+	cat > "$CRON_FILE" <<CRON
+# Swiftrun-VPN — daily restart node (anti-leak). Managed by setup-node.sh.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+$DAILY_RESTART_HOUR 0 * * * root cd $NODE_DIR && docker compose restart $NODE_SVC >/var/log/swiftrun-restart.log 2>&1
+CRON
+	chmod 644 "$CRON_FILE"
+	systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null || true
+	ok "cron установлен (daily restart в ${DAILY_RESTART_HOUR}:00)"
+
+	# --- 8.5 Проверка ---
+
+	sleep 3
+	AUTOHEAL_STATE=$(docker inspect autoheal --format '{{.State.Status}}' 2>/dev/null || echo "?")
+	NODE_HEALTH=$(docker inspect "$(docker compose -f "$NODE_DIR/docker-compose.yml" ps -q "$NODE_SVC" 2>/dev/null)" \
+		--format '{{.State.Health.Status}}' 2>/dev/null || echo "starting")
+
+	ok "autoheal:    $AUTOHEAL_STATE"
+	ok "node health: $NODE_HEALTH (станет healthy через ~60 сек если порт открыт)"
+fi
 
 # =========================================================================
 # Финальный summary
@@ -645,18 +775,28 @@ cat <<EOF
   Каталог:                $NODE_DIR
   TCP congestion control: ${CURRENT_CC:-?}
   Default qdisc:          ${CURRENT_QDISC:-?}
+  Autoheal:               ${SKIP_AUTOHEAL:+пропущен (--skip-autoheal)}${SKIP_AUTOHEAL:-✓ watchdog запущен (interval=${AUTOHEAL_INTERVAL}s)}
+  Daily restart:          ${SKIP_AUTOHEAL:+—}${SKIP_AUTOHEAL:-✓ ${DAILY_RESTART_HOUR}:00 каждый день}
 
 Проверь в Remnawave admin:
   Nodes → должна появиться твоя со статусом Connected (через 30-60 сек)
 
 Полезные команды на ноде:
-  cd $NODE_DIR && docker compose logs -f       # логи контейнера
-  docker compose ps                            # статус
-  ss -tin | grep bbr | head -5                 # проверить BBR работает
-  ufw status numbered                          # firewall правила
-  fail2ban-client status sshd                  # забаненные IP
+  cd $NODE_DIR && docker compose logs -f          # логи ноды
+  docker compose ps                               # статус (health: healthy?)
+  docker logs -f autoheal                         # логи watchdog'а
+  ss -tin | grep bbr | head -5                    # проверить BBR работает
+  ufw status numbered                             # firewall правила
+  fail2ban-client status sshd                     # забаненные IP
+  cat /etc/cron.d/swiftrun-remnanode-daily-restart  # cron на ежедневный рестарт
 
 Если позже надо добавить/изменить IP панели в firewall:
-  sudo bash $0 --panel-ip <NEW_PANEL_IP> --skip-tuning --skip-fail2ban
+  sudo bash $0 --panel-ip <NEW_PANEL_IP> --skip-tuning --skip-fail2ban --skip-autoheal
+
+Отключить autoheal (если мешает):
+  docker rm -f autoheal
+  rm /etc/cron.d/swiftrun-remnanode-daily-restart
+  rm $NODE_DIR/docker-compose.override.yml
+  cd $NODE_DIR && docker compose up -d
 
 EOF
