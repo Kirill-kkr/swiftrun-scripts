@@ -59,12 +59,18 @@ NODE_SVC=$(grep -E '^[[:space:]]*[a-z_-]+:[[:space:]]*$' docker-compose.yml \
 [ -z "$NODE_SVC" ] && NODE_SVC="remnanode"
 log "сервис в compose: $NODE_SVC"
 
-# Авто-детект порта если не указан
+# Авто-детект порта если не указан.
+# grep может вернуть exit=1 если в compose нет port-mapping (network_mode: host)
+# — это нормально, не считаем ошибкой. || true спасает от set -e + pipefail.
 if [ -z "$NODE_PORT" ]; then
-	NODE_PORT=$(grep -oE '[0-9]+:[0-9]+' docker-compose.yml | head -1 | cut -d: -f1)
+	NODE_PORT=$(grep -oE '[0-9]+:[0-9]+' docker-compose.yml 2>/dev/null | head -1 | cut -d: -f1 || true)
+	if [ -z "$NODE_PORT" ]; then
+		# Попробуем найти через APP_PORT / env / etc внутри compose
+		NODE_PORT=$(grep -oE 'APP_PORT[=:]\s*"?[0-9]+' docker-compose.yml 2>/dev/null | grep -oE '[0-9]+' | head -1 || true)
+	fi
 	[ -z "$NODE_PORT" ] && NODE_PORT=2222
 fi
-log "порт ноды: $NODE_PORT"
+log "порт ноды: $NODE_PORT (если у тебя другой — передай --node-port N)"
 
 # --- 1. override.yml: label + healthcheck ---
 
